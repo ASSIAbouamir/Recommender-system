@@ -1,0 +1,37 @@
+# RecLM-RAG: State-of-the-Art Retrieval-Augmented Recommender System
+# Requirements for 2025
+
+# Core ML & NLP
+torch>=2.1.0
+transformers>=4.36.0
+sentence-transformers>=2.3.0
+faiss-cpu>=1.7.4  # Use faiss-gpu if GPU available
+numpy>=1.24.0
+pandas>=2.1.0
+scikit-learn>=1.3.0
+
+# LLM & API
+openai>=1.12.0  # For OpenAI models
+groq>=0.3.0  # For Groq API (fast inference)
+openrouter>=0.0.19  # Alternative API
+
+# Data processing
+pyarrow>=14.0.0
+tqdm>=4.66.0
+jsonlines>=4.0.0
+
+# Web interface
+gradio>=4.7.0
+pillow>=10.1.0
+requests>=2.31.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0
+joblib>=1.3.0
+
+# Optional but recommended
+wandb>=0.16.0  # For experiment tracking
+matplotlib>=3.8.0
+seaborn>=0.13.0
+

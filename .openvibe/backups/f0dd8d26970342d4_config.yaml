@@ -1,0 +1,44 @@
+# RecLM-RAG Configuration File
+
+# Data paths
+data:
+  data_path: "data"
+  processed_path: "data/products_processed.parquet"
+  index_path: "index/faiss_index"
+  
+  # Data filtering
+  min_reviews: 2
+  min_rating: 3.0
+
+# Embedding model
+embedding:
+  model_name: "BAAI/bge-large-en-v1.5"  # or "BAAI/bge-base-en-v1.5" for faster
+  device: "auto"  # "cuda", "cpu", or "auto"
+  batch_size: 32
+  cache_dir: "embeddings"
+
+# FAISS index
+index:
+  index_type: "auto"  # "auto", "flat", "ivf"
+  n_clusters: 100  # for IVF index
+  
+# LLM settings
+llm:
+  provider: "groq"  # "groq", "openai", "openrouter"
+  model: "llama-3.1-70b-versatile"
+  temperature: 0.3
+  max_tokens: 2000
+
+# Recommendation settings
+recommendation:
+  retrieval_k: 100  # Number of candidates to retrieve
+  final_k: 10  # Number of final recommendations
+  use_llm_rerank: true  # Use LLM for re-ranking
+  sustainability_mode: false  # Prioritize eco-friendly products
+
+# Gradio UI
+ui:
+  port: 7860
+  share: false  # Create public link
+
+
