@@ -1,4 +1,4 @@
-# 🚀 RecLM-RAG: State-of-the-Art Retrieval-Augmented Recommender System (2025)
+#  RecLM-RAG: State-of-the-Art Retrieval-Augmented Recommender System (2025)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -15,7 +15,7 @@
 - ✅ **Beautiful Gradio UI**: Modern, intuitive interface for testing and demonstration
 - ✅ **Baseline Comparisons**: Compare against popularity-based and collaborative filtering baselines
 
-## 📊 Performance
+##  Performance
 
 Outperforms traditional collaborative filtering on:
 - **NDCG@10**: +15-25% improvement
