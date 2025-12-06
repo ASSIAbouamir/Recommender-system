@@ -155,7 +155,9 @@ class RecLM_RAG:
         k: int = 10,
         retrieval_k: int = 100,
         sustainability_mode: bool = False,
-        use_llm_rerank: bool = True
+        use_llm_rerank: bool = True,
+        use_history_in_prompt: bool = True,
+        return_latency_breakdown: bool = False
     ) -> List[Dict]:
         """
         Generate recommendations for a user
@@ -168,10 +170,23 @@ class RecLM_RAG:
             retrieval_k: Number of candidates to retrieve before LLM re-ranking
             sustainability_mode: Prioritize sustainable products
             use_llm_rerank: Whether to use LLM for re-ranking (False = just return top-k from retrieval)
+            return_latency_breakdown: If True, return latency breakdown dict
         
         Returns:
             List of recommendation dicts with keys: asin, title, score, explanation, etc.
+            If return_latency_breakdown=True, last item is dict with latency breakdown
         """
+        import time
+        latency = {
+            'embedding': 0.0,
+            'faiss_retrieval': 0.0,
+            'sustainability_scoring': 0.0,
+            'prompt_construction': 0.0,
+            'llm_inference': 0.0,
+            'json_parsing': 0.0,
+            'total': 0.0
+        }
+        start_total = time.time()
         # Get user history
         if user_id:
             user_history = self.data_loader.get_user_history(user_id, top_k=20)
@@ -186,61 +201,105 @@ class RecLM_RAG:
             user_history = pd.DataFrame()
             user_history_asins = []
         
-        # Create query embedding
-        if len(user_history_asins) > 0:
-            # History-based query
-            history_texts = []
+        # Create query embedding (as per paper: Input Encoding section)
+        start_emb = time.time()
+        if natural_query:
+            # Query mode: use query directly
+            query_embedding = self.embedder.embed_query(natural_query)
+            query_summary = natural_query
+        elif len(user_history_asins) > 0:
+            # History mode: "User bought: " + concat(titles) as per paper
+            titles = []
             for asin in user_history_asins:
                 if asin in self.product_map:
                     product = self.product_map[asin]
-                    history_texts.append(product.get('text_for_embedding', ''))
+                    title = product.get('title', '')
+                    if title:
+                        titles.append(title)
             
-            query_embedding = self.embedder.create_query_embedding(
-                history_texts,
-                natural_query=natural_query
-            )
-            
-            # Create natural query summary
-            if natural_query:
-                query_summary = natural_query
+            if titles:
+                # Paper format: "User bought: " + concat(titles)
+                history_input = "User bought: " + ", ".join(titles)
+                query_embedding = self.embedder.embed_query(history_input)
+                query_summary = history_input
             else:
+                # Fallback: use text_for_embedding
+                history_texts = []
+                for asin in user_history_asins:
+                    if asin in self.product_map:
+                        product = self.product_map[asin]
+                        history_texts.append(product.get('text_for_embedding', ''))
+                query_embedding = self.embedder.create_query_embedding(history_texts)
                 query_summary = create_rich_query_text(user_history, natural_query)
         else:
-            # Zero-shot: embed natural query directly
-            if natural_query:
-                query_embedding = self.embedder.embed_query(natural_query)
-                query_summary = natural_query
-            else:
-                # Fallback: return popular products
-                return self._get_popular_recommendations(k)
+            # No history and no query: return popular products
+            return self._get_popular_recommendations(k)
+        
+        latency['embedding'] = (time.time() - start_emb) * 1000  # ms
         
         # Retrieve candidates
+        start_faiss = time.time()
         distances, indices = self.indexer.search(
             query_embedding,
             k=retrieval_k,
             filter_ids=np.array(user_history_asins) if user_history_asins else None
         )
+        latency['faiss_retrieval'] = (time.time() - start_faiss) * 1000  # ms
         
         # Get product IDs
         candidate_asins = self.indexer.get_product_ids(indices)
         
         # Prepare candidate products for LLM
+        if len(candidate_asins) > 0:
+            print(f"DEBUG: Retrieval found {len(candidate_asins)} candidates. Top 5: {candidate_asins[:5]}")
+        else:
+            print("DEBUG: Retrieval found 0 candidates!")
+
+        start_sust = time.time()
+
         candidate_products = []
         for asin, score in zip(candidate_asins, distances):
             if asin in self.product_map:
                 product = self.product_map[asin].copy()
                 product['score'] = float(score)
+                
+                # Add sustainability score (always computed as per algorithm)
+                # Combine title + description for keywords
+                full_text = f"{product.get('title', '')} {product.get('description', '')}"
+                sust_eval = evaluate_sustainability_score(
+                    title=product.get('title', ''),
+                    description=product.get('description', ''),
+                    brand=product.get('brand', ''),
+                    features=str(product.get('category', '')),
+                    keywords=extract_sustainability_keywords(full_text)
+                )
+                product['sustainability_score'] = sust_eval['sustainability_score']
+                product['sustainability_reason'] = sust_eval['short_reason']
+                
                 candidate_products.append(product)
+        latency['sustainability_scoring'] = (time.time() - start_sust) * 1000  # ms
         
         # Re-rank with LLM if enabled
         if use_llm_rerank and self.llm_client:
-            recommendations = self._llm_rerank(
-                user_history,
+            # Ablation Logic: Mask history if disabled
+            rerank_history = user_history if use_history_in_prompt else pd.DataFrame()
+            rerank_query = query_summary
+            if not use_history_in_prompt and not natural_query:
+                rerank_query = "Recommend best matching products"
+
+            result = self._llm_rerank(
+                rerank_history,
                 candidate_products,
-                query_summary,
+                rerank_query,
                 sustainability_mode,
-                k
+                k,
+                return_latency=True
             )
+            if isinstance(result, tuple):
+                recommendations, llm_latency = result
+                latency.update(llm_latency)
+            else:
+                recommendations = result
         else:
             # Just return top-k from retrieval
             recommendations = []
@@ -271,6 +330,15 @@ class RecLM_RAG:
                     **product
                 })
         
+        latency['total'] = (time.time() - start_total) * 1000  # ms
+        
+        if return_latency_breakdown:
+            # Add latency breakdown as metadata to last recommendation
+            if recommendations:
+                recommendations[-1]['_latency_breakdown'] = latency
+            else:
+                recommendations.append({'_latency_breakdown': latency})
+        
         return recommendations
     
     def _llm_rerank(
@@ -279,9 +347,18 @@ class RecLM_RAG:
         candidate_products: List[Dict],
         query: str,
         sustainability_mode: bool,
-        k: int
-    ) -> List[Dict]:
+        k: int,
+        return_latency: bool = False
+    ) -> tuple:
         """Use LLM to re-rank candidates and generate explanations"""
+        import time
+        import json
+        import re
+        latency = {
+            'prompt_construction': 0.0,
+            'llm_inference': 0.0,
+            'json_parsing': 0.0
+        }
         # Create user history summary
         if len(user_history) > 0:
             history_summary = f"User has purchased {len(user_history)} products:\n"
@@ -299,6 +376,7 @@ class RecLM_RAG:
         )
         
         # Create RAG prompt with search criteria
+        start_prompt = time.time()
         prompt = create_rag_prompt(
             history_summary,
             candidate_products,
@@ -306,13 +384,18 @@ class RecLM_RAG:
             sustainability_mode=sustainability_mode,
             search_criteria=search_criteria
         )
+        latency['prompt_construction'] = (time.time() - start_prompt) * 1000  # ms
         
         # Call LLM
         print("Calling LLM for re-ranking and explanation generation...")
+        start_llm = time.time()
         response = self.llm_client.generate(prompt)
+        latency['llm_inference'] = (time.time() - start_llm) * 1000  # ms
         
         # Parse response
+        start_parse = time.time()
         llm_recommendations = parse_llm_response(response)
+        latency['json_parsing'] = (time.time() - start_parse) * 1000  # ms
         
         # Map LLM recommendations back to full product info
         final_recommendations = []
@@ -384,6 +467,8 @@ class RecLM_RAG:
                     if len(final_recommendations) >= k:
                         break
         
+        if return_latency:
+            return final_recommendations[:k], latency
         return final_recommendations[:k]
     
     def _get_popular_recommendations(self, k: int) -> List[Dict]:

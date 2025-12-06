@@ -48,10 +48,10 @@ def create_product_card_html(
     # Sustainability badge
     sustainability_html = ""
     if sustainability_score is not None:
-        # Color based on score
-        if sustainability_score >= 8:
+        # Color based on score (0-100 scale)
+        if sustainability_score >= 80:
             color = "#28a745"  # Green
-        elif sustainability_score >= 6:
+        elif sustainability_score >= 60:
             color = "#ffc107"  # Yellow
         else:
             color = "#dc3545"  # Red
@@ -59,7 +59,7 @@ def create_product_card_html(
         sustainability_html = f"""
         <div style="margin-top:8px;padding:8px;background:#f8f9fa;border-radius:4px;border-left:3px solid {color};">
             <p style="margin:0;font-size:12px;font-weight:bold;color:{color};">
-                🌱 Durabilité: {sustainability_score}/10
+                🌱 Durabilité: {sustainability_score}/100
             </p>
             <p style="margin:4px 0 0 0;font-size:11px;color:#666;">
                 {sustainability_reason or "Évaluation en cours"}
@@ -147,7 +147,7 @@ def evaluate_sustainability_score(
     
     evaluation_prompt = f"""Tu es un expert en durabilité et éco-responsabilité produit.
 
-Évalue ce produit de 0 à 10 en termes de durabilité réelle (et pas juste greenwashing).
+Évalue ce produit de 0 à 100 en termes de durabilité réelle (et pas juste greenwashing).
 
 Critères pris en compte :
 
@@ -165,7 +165,7 @@ Critères pris en compte :
 
 Réponds EXACTEMENT avec ce format (rien d'autre) :
 
-{{"sustainability_score": 8.7, "short_reason": "Cuir de pomme recyclé, marque B-Corp, fabriqué en Italie, réparable à vie"}}
+{{"sustainability_score": 87, "short_reason": "Cuir de pomme recyclé, marque B-Corp, fabriqué en Italie, réparable à vie"}}
 
 Produit :
 
@@ -190,72 +190,91 @@ Mots-clés détectés : {keywords_text}
                 eval_data = json.loads(json_match.group(0))
                 score = float(eval_data.get('sustainability_score', 0))
                 reason = eval_data.get('short_reason', '')
-                # Ensure score is between 0 and 10
-                score = max(0, min(10, score))
+                # Convert from 0-10 to 0-100 scale (as per paper)
+                if score <= 10:
+                    score = score * 10
+                # Ensure score is between 0 and 100
+                score = max(0, min(100, score))
                 return {
-                    'sustainability_score': score,
+                    'sustainability_score': round(score, 1),
                     'short_reason': reason
                 }
         except Exception as e:
             print(f"Error evaluating sustainability with LLM: {e}, falling back to rule-based")
     
     # Fallback to rule-based evaluation
+    # Article formula: S(i) = 100 * (w_pos * I[pos] - w_neg * I[neg] + b_cert)
+    
     full_text = f"{title} {description} {features} {brand}".lower()
-    score = 5.0  # Base score
-    reasons = []
     
-    # Material certifications (high weight)
-    if any(cert in full_text for cert in ['gots', 'oeko-tex', 'bluesign', 'cradle to cradle']):
-        score += 2.0
-        reasons.append("certification matériaux")
+    # Weights (calibrated as per article inspiration)
+    w_pos = 0.15  # Weight for each positive attribute
+    w_neg = 0.20  # Weight for each negative attribute
+    b_cert = 0.10 # Bonus for certification
     
-    # Recycled materials
-    if any(word in full_text for word in ['recycled', 'recyclé', 'upcycled', 'récupéré']):
-        score += 1.5
-        reasons.append("matériaux recyclés")
+    # Positive keywords / attributes
+    pos_count = 0
+    positive_reasons = []
     
-    # Bio-based materials
-    if any(word in full_text for word in ['bio', 'organic', 'biologique', 'biosourcé', 'cork', 'liège']):
-        score += 1.0
-        reasons.append("matériaux biosourcés")
+    # Positive: Recycled / Circular
+    if any(word in full_text for word in ['recycled', 'recyclé', 'upcycled', 'récupéré', 'circular']):
+        pos_count += 1
+        positive_reasons.append("Recycled materials")
+        
+    # Positive: Organic / Bio
+    if any(word in full_text for word in ['organic', 'bio', 'biologique', 'natural fibers', 'coton bio']):
+        pos_count += 1
+        positive_reasons.append("Organic materials")
+        
+    # Positive: Fair Trade / Ethical
+    if any(word in full_text for word in ['fair trade', 'équitable', 'ethical', 'ethique', 'b-corp', 'b corp']):
+         pos_count += 1
+         positive_reasons.append("Ethical certification")
+         
+    # Positive: Local / Made in Europe
+    if any(word in full_text for word in ['made in europe', 'fabriqué en europe', 'made in france', 'local']):
+        pos_count += 1
+        positive_reasons.append("Made in Europe/Local")
+
+    # Positive: Carbon/Energy
+    if any(word in full_text for word in ['carbon neutral', 'solar', 'low energy', 'basse consommation']):
+        pos_count += 1
+        positive_reasons.append("Energy efficient")
     
-    # Brand certifications
-    if any(cert in full_text for cert in ['b-corp', 'b corp', '1% for the planet', 'fair trade', 'commerce équitable']):
-        score += 1.5
-        reasons.append("marque certifiée éthique")
+    # Negative keywords / attributes
+    neg_count = 0
+    negative_reasons = []
     
-    # Repairability
-    if any(word in full_text for word in ['réparable', 'repairable', 'réparation', 'garantie', 'warranty']):
-        score += 0.5
-        reasons.append("réparable")
+    # Negative: Virgin plastic / Synthetic
+    if any(word in full_text for word in ['virgin plastic', 'plastique vierge', 'polyester', 'synthetic', 'acrylique']) and 'recycled' not in full_text:
+        neg_count += 1
+        negative_reasons.append("Virgin synthetic materials")
+        
+    # Negative: Fast Fashion indicators (generic)
+    if any(word in full_text for word in ['fast fashion', 'trend', 'jetable', 'disposable']):
+        neg_count += 1
+        negative_reasons.append("Disposable/Fast fashion")
     
-    # Local/EU production
-    if any(word in full_text for word in ['made in france', 'fabriqué en france', 'made in europe', 'fabriqué en europe', 'local']):
-        score += 0.5
-        reasons.append("production locale")
+    # Certification bonus (b_cert)
+    cert_score = 0
+    if any(cert in full_text for cert in ['gots', 'oeko-tex', 'bluesign', 'cradle to cradle', 'epeat']):
+        cert_score = b_cert
+        positive_reasons.append("High-standard Certification")
     
-    # Vegan/animal-free
-    if any(word in full_text for word in ['vegan', 'végan', 'cruelty-free', 'sans cruauté']):
-        score += 0.5
-        reasons.append("végan")
+    # Calculate raw score (Article Formula)
+    # S(i) = 100 * (w_pos * pos_count - w_neg * neg_count + cert_score)
+    raw_score = 100 * (w_pos * pos_count - w_neg * neg_count + cert_score)
     
-    # Durability keywords
-    if any(word in full_text for word in ['durable', 'durability', 'long-lasting', 'résistant', 'robust']):
-        score += 0.5
-        reasons.append("durable")
-    
-    # Negative indicators (greenwashing)
-    if any(word in full_text for word in ['green', 'eco', 'éco']) and not any(word in full_text for word in ['certified', 'certifié', 'recycled', 'recyclé']):
-        score -= 0.5  # Possible greenwashing
-    
-    # Ensure score is between 0 and 10
-    score = max(0, min(10, score))
+    # Clamp to [0, 100]
+    score = max(0, min(100, raw_score))
     
     # Generate short reason
-    if reasons:
-        short_reason = ", ".join(reasons[:3])  # Top 3 reasons
+    if positive_reasons:
+        short_reason = ", ".join(positive_reasons[:3])
+    elif negative_reasons:
+        short_reason = "Concerns: " + ", ".join(negative_reasons[:2])
     else:
-        short_reason = "Évaluation standard"
+        short_reason = "Standard product"
     
     return {
         'sustainability_score': round(score, 1),
@@ -459,7 +478,7 @@ def create_rag_prompt(
     search_criteria: Optional[List[str]] = None
 ) -> str:
     """
-    Create RAG prompt for LLM
+    Create RAG prompt for LLM (as per paper format)
     
     Args:
         user_history_summary: Summary of user's purchase history
@@ -468,74 +487,82 @@ def create_rag_prompt(
         sustainability_mode: Whether to prioritize sustainable products
     
     Returns:
-        Formatted prompt string
+        Formatted prompt string matching paper format
     """
-    # Format candidate products
-    products_text = ""
+    # Format candidate products as per paper: title, short description, sustainability score
+    candidate_list = ""
     for i, product in enumerate(candidate_products[:100], 1):  # Top 100
-        products_text += f"\n{i}. ASIN: {product['asin']}\n"
-        products_text += f"   Title: {product['title']}\n"
-        products_text += f"   Category: {product.get('category', 'N/A')}\n"
-        products_text += f"   Description: {product.get('description', '')[:200]}\n"
-        products_text += f"   Retrieval Score: {product.get('score', 0):.4f}\n"
+        title = product.get('title', 'Unknown')
+        desc = product.get('description', '')[:150]  # Short description
+        sust_score = product.get('sustainability_score', 0)
+        candidate_list += f"{i}. {title} | {desc} | Sustainability: {sust_score}/100\n"
     
-    sustainability_note = ""
+    # Format user history (last 5 items as per paper)
+    history_text = ""
+    if user_history_summary and user_history_summary != "No purchase history available.":
+        # Extract last 5 items from history summary
+        lines = user_history_summary.split('\n')[:6]  # First line + up to 5 items
+        history_text = "\n".join(lines)
+    else:
+        history_text = "No purchase history"
+    
+    sustainability_goal = ""
     if sustainability_mode:
-        sustainability_note = """
-IMPORTANT: Prioritize products that are sustainable, eco-friendly, organic, recycled, or vegan.
-Look for keywords like: organic, recycled, sustainable, eco-friendly, vegan, biodegradable, fair trade.
-"""
+        sustainability_goal = "Sustainability goal: prioritize eco-friendly products."
     
-    criteria_section = ""
-    if search_criteria:
-        criteria_list = "\n".join([f"- {criterion}" for criterion in search_criteria])
-        criteria_section = f"""
-Precise Search Criteria (implicit user requirements):
-{criteria_list}
+    # Paper format prompt
+    prompt = f"""You are an ethical and expert shopping assistant.
 
-IMPORTANT: Prioritize products that match these criteria when ranking.
-"""
-    
-    prompt = f"""You are an expert product recommendation assistant for an e-commerce platform.
+User query: "{query if query else 'Recommend products based on my purchase history'}"
 
-User's Purchase History:
-{user_history_summary}
+User history (last 5 items): {history_text}
 
-{f"User Query: {query}" if query else ""}
+{sustainability_goal}
 
-{criteria_section}
+Here are 100 candidate products with title, short description and sustainability score (0-100):
 
-Candidate Products (retrieved from similarity search):
-{products_text}
+{candidate_list}
 
-Your task:
-1. Analyze the user's purchase history and preferences
-2. From the candidate products above, select the TOP 10 most relevant products
-3. Re-rank them in order of relevance (1 = most relevant)
-4. For each product, provide a natural, convincing explanation (2-3 sentences) explaining why you recommend it
+Return exactly the TOP-10 best matches, ranked by relevance + sustainability. For each:
+- Product title
+- One-sentence natural explanation in French/English
+- Sustainability score
 
-{sustainability_note}
+Format: JSON array, no extra text.
 
-Output your recommendations in the following JSON format:
 {{
   "recommendations": [
     {{
       "rank": 1,
+      "title": "Product Title",
       "asin": "B00XXXXX",
-      "explanation": "Why this product is perfect for the user..."
+      "explanation": "One-sentence explanation in French or English",
+      "sustainability_score": 85
     }},
     ...
   ]
 }}
-
-Be specific and reference the user's past purchases when relevant. Make the explanations engaging and personalized.
 """
     
     return prompt
 
 
 def parse_llm_response(response_text: str) -> List[Dict]:
-    """Parse LLM JSON response"""
+    """
+    Parse LLM JSON response (as per paper format)
+    Expected format:
+    {
+      "recommendations": [
+        {
+          "rank": 1,
+          "title": "Product Title",
+          "asin": "B00XXXXX",
+          "explanation": "One-sentence explanation",
+          "sustainability_score": 85
+        }
+      ]
+    }
+    """
     try:
         # Try to extract JSON from markdown code blocks
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)

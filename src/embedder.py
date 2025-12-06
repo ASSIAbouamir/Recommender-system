@@ -82,7 +82,19 @@ class ProductEmbedder:
             if cache_path.exists():
                 print(f"Loading embeddings from cache: {cache_path}")
                 with open(cache_path, 'rb') as f:
-                    return pickle.load(f)
+                    embeddings = pickle.load(f)
+                    # Validate cached embeddings
+                    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+                        print(f"Warning: Cached embeddings are invalid (shape: {embeddings.shape}). Regenerating...")
+                    else:
+                        return embeddings
+        
+        # Validate input
+        if len(texts) == 0:
+            raise ValueError(
+                "Cannot generate embeddings for empty product list. "
+                "Please check your data loading and preprocessing steps."
+            )
         
         print(f"Generating embeddings for {len(texts)} products...")
         

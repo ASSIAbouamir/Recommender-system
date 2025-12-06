@@ -13,14 +13,24 @@ import pickle
 class FAISSIndexer:
     """Build and manage FAISS index for product retrieval"""
     
-    def __init__(self, embedding_dim: int, index_type: str = "auto"):
+    def __init__(
+        self, 
+        embedding_dim: int, 
+        index_type: str = "auto",
+        nprobe: int = 64,
+        efSearch: int = 128
+    ):
         """
         Args:
             embedding_dim: Dimension of embeddings
             index_type: 'flat', 'ivf', 'hnsw', or 'auto' (choose based on size)
+            nprobe: Number of clusters to probe for IVF indexes (paper: 64)
+            efSearch: HNSW search parameter (paper: 128)
         """
         self.embedding_dim = embedding_dim
         self.index_type = index_type
+        self.nprobe = nprobe
+        self.efSearch = efSearch
         self.index = None
         self.product_ids = None  # Map index position to product ASIN
         
@@ -38,6 +48,20 @@ class FAISSIndexer:
             product_ids: array of product ASINs corresponding to embeddings
             n_clusters: Number of clusters for IVF index (ignored for flat)
         """
+        # Validate embeddings shape
+        if embeddings.ndim != 2:
+            raise ValueError(
+                f"Embeddings must be a 2D array, got shape {embeddings.shape}. "
+                f"This usually means the product dataset is empty. "
+                f"Please check your data loading and preprocessing steps."
+            )
+        
+        if embeddings.shape[0] == 0:
+            raise ValueError(
+                "Cannot build index with 0 products. "
+                "Please check your data loading and preprocessing steps."
+            )
+        
         n_products, dim = embeddings.shape
         assert dim == self.embedding_dim, f"Dimension mismatch: {dim} != {self.embedding_dim}"
         
@@ -46,28 +70,42 @@ class FAISSIndexer:
         # Choose index type
         if self.index_type == "auto":
             if n_products < 50000:
-                index_type = "flat"
-            elif n_products < 500000:
-                index_type = "ivf"
+                index_type_str = "Flat"
             else:
-                index_type = "ivf"  # Can switch to HNSW for very large datasets
+                index_type_str = "IVF100,Flat" # Default simple IVF
         else:
-            index_type = self.index_type
+            index_type_str = self.index_type
         
-        # Build appropriate index
-        if index_type == "flat":
-            print("Using FlatIndex (exact search, slower for large datasets)")
-            self.index = faiss.IndexFlatIP(dim)  # Inner product for cosine similarity (normalized embeddings)
-        elif index_type == "ivf":
-            print(f"Using IVF index with {n_clusters} clusters (approximate, faster)")
-            quantizer = faiss.IndexFlatIP(dim)
-            self.index = faiss.IndexIVFFlat(quantizer, dim, min(n_clusters, n_products // 10))
+        print(f"Building index type: {index_type_str}")
+        
+        # Build index using factory
+        try:
+            # Check if we need to measure training time or use GPU
+            # For this simplified version, we use CPU and factory
             
-            # Train the index
-            print("Training IVF index...")
-            self.index.train(embeddings.astype('float32'))
-        else:
-            raise ValueError(f"Unknown index type: {index_type}")
+            # Special handling for metric (Inner Product vs L2)
+            # BGE embeddings are normalized, so IP == Cosine Similarity
+            metric = faiss.METRIC_INNER_PRODUCT
+            
+            self.index = faiss.index_factory(self.embedding_dim, index_type_str, metric)
+            
+            # Set parameters if available (e.g. nprobe)
+            # Note: These are usually set at search time, but can be set on index
+        except Exception as e:
+             print(f"Error creating index with factory: {e}. Falling back to Flat.")
+             self.index = faiss.IndexFlatIP(dim)
+
+        # Train if necessary
+        if not self.index.is_trained:
+            print(f"Training index with {min(50000, len(embeddings))} samples...")
+            # Use a random subset for training if dataset is huge
+            if len(embeddings) > 50000:
+                indices = np.random.choice(len(embeddings), 50000, replace=False)
+                train_data = embeddings[indices]
+            else:
+                train_data = embeddings
+            
+            self.index.train(train_data.astype('float32'))
         
         # Add embeddings to index
         print("Adding embeddings to index...")
@@ -102,6 +140,24 @@ class FAISSIndexer:
         
         # Reshape query to (1, dim)
         query = query_embedding.reshape(1, -1).astype('float32')
+        
+        # Debug: Check dimension mismatch
+        if query.shape[1] != self.index.d:
+            raise ValueError(
+                f"Query embedding dimension mismatch! "
+                f"Query has {query.shape[1]} dimensions, but index expects {self.index.d}. "
+                f"This usually means the embedding model changed. "
+                f"Please delete the index files and rebuild."
+            )
+        
+        # Set search parameters as per paper
+        # For IVF indexes, set nprobe
+        if hasattr(self.index, 'nprobe'):
+            self.index.nprobe = self.nprobe
+        
+        # For HNSW indexes, set efSearch
+        if hasattr(self.index, 'hnsw') and hasattr(self.index.hnsw, 'efSearch'):
+            self.index.hnsw.efSearch = self.efSearch
         
         # Search
         distances, indices = self.index.search(query, k)

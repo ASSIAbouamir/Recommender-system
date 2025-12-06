@@ -27,45 +27,88 @@ class AmazonDataLoader:
         self.metadata_df = None
         self.products_df = None
         
-    def load_reviews(self, file_path: Optional[str] = None) -> pd.DataFrame:
+    def load_reviews(self, file_path: Optional[str] = None, limit: Optional[int] = None) -> pd.DataFrame:
         """
         Load reviews from JSON/JSONL file
         Format: Each line is a JSON object with keys: reviewerID, asin, reviewText, overall, etc.
         """
+        import gzip
+        
         if file_path is None:
             # Try to find reviews file
             possible_names = [
                 f"reviews_{self.category}.json",
+                f"reviews_{self.category}.json.gz",
                 f"reviews_{self.category}.jsonl",
                 "reviews.json",
                 "reviews.jsonl",
-                f"{self.category}.json"
+                f"{self.category}.json",
+                f"{self.category}.json.gz"
             ]
             
-            for name in possible_names:
-                path = self.data_path / name
-                if path.exists():
-                    file_path = str(path)
+            # Check direct paths and nested directories
+            search_paths = [self.data_path, self.data_path / f"{self.category}.json"]
+            
+            for base_path in search_paths:
+                if not base_path.exists(): 
+                    continue
+                    
+                for name in possible_names:
+                    # Check if base_path is a directory
+                    if base_path.is_dir():
+                        path = base_path / name
+                    # Check if base_path itself matches (if it's a file)
+                    elif base_path.name == name:
+                        path = base_path
+                    else:
+                        continue
+                        
+                    if path.exists():
+                        file_path = str(path)
+                        break
+                if file_path:
                     break
             
             if file_path is None:
-                raise FileNotFoundError(f"Reviews file not found in {self.data_path}")
+                # If we still haven't found it, try checking if the category folder contains ANY json file
+                category_dir = self.data_path / f"{self.category}.json"
+                if category_dir.exists() and category_dir.is_dir():
+                    for ext in ['*.json', '*.json.gz', '*.jsonl']:
+                        found = list(category_dir.glob(ext))
+                        if found:
+                            file_path = str(found[0])
+                            break
+
+            if file_path is None:
+                raise FileNotFoundError(f"Reviews file for category '{self.category}' not found in {self.data_path}")
         
         print(f"Loading reviews from {file_path}...")
         
         reviews = []
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in tqdm(f, desc="Reading reviews"):
+        is_gz = str(file_path).endswith('.gz')
+        open_func = gzip.open if is_gz else open
+        
+        with open_func(file_path, 'rt', encoding='utf-8') as f:
+            count = 0
+            # Use tqdm only if not in limit mode or if limit is large
+            iterator = tqdm(f, desc="Reading reviews") if limit is None or limit > 1000 else f
+            
+            for line in iterator:
+                if limit and count >= limit:
+                    break
                 try:
                     review = json.loads(line.strip())
+                    # Handle both 'rating' and 'overall' field names (different datasets use different names)
+                    rating_value = review.get('rating', review.get('overall', 0))
                     reviews.append({
                         'reviewerID': review.get('reviewerID', ''),
                         'asin': review.get('asin', ''),
-                        'rating': float(review.get('overall', 0)),
+                        'rating': float(rating_value),
                         'reviewText': review.get('reviewText', ''),
                         'summary': review.get('summary', ''),
                         'unixReviewTime': review.get('unixReviewTime', 0)
                     })
+                    count += 1
                 except json.JSONDecodeError:
                     continue
         
@@ -73,14 +116,17 @@ class AmazonDataLoader:
         print(f"Loaded {len(self.reviews_df)} reviews")
         return self.reviews_df
     
-    def load_metadata(self, file_path: Optional[str] = None) -> pd.DataFrame:
+    def load_metadata(self, file_path: Optional[str] = None, limit: Optional[int] = None) -> pd.DataFrame:
         """
         Load product metadata
         Format: Each line is a JSON object with keys: asin, title, description, price, category, etc.
         """
+        import gzip
+
         if file_path is None:
             possible_names = [
                 f"meta_{self.category}.json",
+                f"meta_{self.category}.json.gz",
                 f"meta_{self.category}.jsonl",
                 "metadata.json",
                 "metadata.jsonl",
@@ -88,10 +134,25 @@ class AmazonDataLoader:
                 f"{self.category}_meta.json"
             ]
             
-            for name in possible_names:
-                path = self.data_path / name
-                if path.exists():
-                    file_path = str(path)
+            # Check direct paths and nested directories
+            search_paths = [self.data_path, self.data_path / f"{self.category}.json", self.data_path / "metadata"]
+            
+            for base_path in search_paths:
+                if not base_path.exists():
+                    continue
+                
+                for name in possible_names:
+                    if base_path.is_dir():
+                        path = base_path / name
+                    elif base_path.name == name:
+                        path = base_path
+                    else:
+                        continue
+                        
+                    if path.exists():
+                        file_path = str(path)
+                        break
+                if file_path:
                     break
             
             if file_path is None:
@@ -101,8 +162,16 @@ class AmazonDataLoader:
         print(f"Loading metadata from {file_path}...")
         
         metadata = []
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in tqdm(f, desc="Reading metadata"):
+        is_gz = str(file_path).endswith('.gz')
+        open_func = gzip.open if is_gz else open
+        
+        with open_func(file_path, 'rt', encoding='utf-8') as f:
+            count = 0
+            iterator = tqdm(f, desc="Reading metadata") if limit is None or limit > 1000 else f
+            
+            for line in iterator:
+                if limit and count >= limit:
+                    break
                 try:
                     meta = json.loads(line.strip())
                     
@@ -131,6 +200,7 @@ class AmazonDataLoader:
                         'also_bought': meta.get('also_bought', []),
                         'also_viewed': meta.get('also_viewed', [])
                     })
+                    count += 1
                 except json.JSONDecodeError:
                     continue
         
@@ -144,15 +214,17 @@ class AmazonDataLoader:
             raise ValueError("Reviews must be loaded first")
         
         # Aggregate review info per product
+        # Note: We only create description here, not avg_rating/num_reviews
+        # since those will come from product_reviews in merge_and_preprocess
         product_info = self.reviews_df.groupby('asin').agg({
-            'rating': ['mean', 'count'],
             'reviewText': lambda x: ' '.join(x.astype(str).head(5))  # First 5 reviews as description
         }).reset_index()
         
-        product_info.columns = ['asin', 'avg_rating', 'num_reviews', 'description']
+        product_info.columns = ['asin', 'description']
         product_info['title'] = 'Product ' + product_info['asin']
         product_info['price'] = 0
         product_info['category'] = self.category
+        product_info['brand'] = ''
         
         self.metadata_df = product_info
         return self.metadata_df
@@ -184,11 +256,19 @@ class AmazonDataLoader:
         ]
         
         # Merge with metadata
+        # Use 'left' join to preserve all filtered products even if metadata is incomplete
         products = product_reviews.merge(
             self.metadata_df,
             on='asin',
-            how='inner'
+            how='left',
+            suffixes=('', '_meta')
         )
+        
+        # Fix duplications if they exist
+        if 'avg_rating_meta' in products.columns:
+            products.drop(columns=['avg_rating_meta'], inplace=True, errors='ignore')
+        if 'num_reviews_meta' in products.columns:
+            products.drop(columns=['num_reviews_meta'], inplace=True, errors='ignore')
         
         # Fill missing values
         products['title'] = products['title'].fillna('Untitled Product')
@@ -301,6 +381,10 @@ class AmazonDataLoader:
         else:
             self.products_df = pd.read_csv(input_path)
         
+        # Fix column names from previous bad merges
+        if 'avg_rating_x' in self.products_df.columns:
+            self.products_df.rename(columns={'avg_rating_x': 'avg_rating', 'num_reviews_x': 'num_reviews'}, inplace=True)
+
         # Ensure image_url column exists (for backward compatibility)
         if 'image_url' not in self.products_df.columns:
             if 'imageURL' in self.products_df.columns:

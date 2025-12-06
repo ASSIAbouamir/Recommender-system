@@ -3,7 +3,7 @@
 # Data paths
 data:
   data_path: "data"
-  processed_path: "data/products_processed.parquet"
+  processed_path: "data/Tools_and_Home_Improvement_processed.parquet"
   index_path: "index/faiss_index"
   
   # Data filtering
@@ -13,19 +13,21 @@ data:
 # Embedding model
 embedding:
   model_name: "BAAI/bge-large-en-v1.5"  # or "BAAI/bge-base-en-v1.5" for faster
-  device: "auto"  # "cuda", "cpu", or "auto"
+  device: "cpu"  # "cuda", "cpu", or "auto"
   batch_size: 32
   cache_dir: "embeddings"
 
 # FAISS index
 index:
-  index_type: "auto"  # "auto", "flat", "ivf"
-  n_clusters: 100  # for IVF index
+  index_type: "IVF4096_HNSW32_PQ64"  # matches article
+  n_clusters: 4096  # for IVF
+  nprobe: 64
+  efSearch: 128
   
 # LLM settings
 llm:
   provider: "groq"  # "groq", "openai", "openrouter"
-  model: "llama-3.1-70b-versatile"
+  model: "llama-3.1-8b-instant"
   temperature: 0.3
   max_tokens: 2000
 
@@ -35,6 +37,7 @@ recommendation:
   final_k: 10  # Number of final recommendations
   use_llm_rerank: true  # Use LLM for re-ranking
   sustainability_mode: false  # Prioritize eco-friendly products
+  use_history_in_prompt: true # Include user history in RAG prompt (Disable for ablation)
 
 # Gradio UI
 ui:

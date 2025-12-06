@@ -71,7 +71,10 @@ def initialize_system(
         products_df = data_loader.products_df
         
         # Try to load reviews if they exist
-        reviews_file = Path(data_path) / "reviews_sample.jsonl"
+        # Priority: tools_reviews_sample > reviews_sample > reviews
+        reviews_file = Path(data_path) / "tools_reviews_sample.jsonl"
+        if not reviews_file.exists():
+            reviews_file = Path(data_path) / "reviews_sample.jsonl"
         if not reviews_file.exists():
             reviews_file = Path(data_path) / "reviews.jsonl"
         if not reviews_file.exists():
@@ -99,7 +102,12 @@ def initialize_system(
     
     # Load or create index
     print("\n3. Loading/creating FAISS index...")
-    indexer = FAISSIndexer(embedding_dim=embedder.embedding_dim)
+    indexer = FAISSIndexer(
+        embedding_dim=embedder.embedding_dim,
+        index_type="IVF4096_HNSW32_PQ64",
+        nprobe=64,
+        efSearch=128
+    )
     
     if Path(index_path).with_suffix('.index').exists():
         print(f"Loading index from {index_path}")
@@ -230,6 +238,8 @@ def get_recommendations(
         return rec_html, history_html, comparison_html
     
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return f"Error: {str(e)}", "", ""
 
 
@@ -327,6 +337,87 @@ def compare_with_baselines(
         return error_msg, ""
 
 
+# ... existing imports ...
+import yaml
+import json
+import matplotlib.pyplot as plt
+import io
+import base64
+
+# ... existing code ...
+
+def load_benchmark_results():
+    """Load benchmark results from JSON files"""
+    results_dir = Path("results")
+    if not results_dir.exists():
+        return "No results found. Run benchmark first."
+    
+    results_data = {}
+    for file in results_dir.glob("benchmark_*.json"):
+        category = file.stem.replace("benchmark_", "")
+        with open(file, 'r') as f:
+            results_data[category] = json.load(f)
+            
+    return results_data
+
+def visualize_benchmark(category_results):
+    """Create visualization for benchmark results"""
+    if not category_results:
+        return None
+    
+    # Extract metrics
+    methods = []
+    ndcg_scores = []
+    recall_scores = []
+    
+    for method, metrics in category_results.items():
+        if isinstance(metrics, dict):
+            methods.append(method)
+            ndcg_scores.append(metrics.get('NDCG@10', 0))
+            recall_scores.append(metrics.get('Recall@10', 0))
+    
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(methods))
+    width = 0.35
+    
+    rects1 = ax.bar(x - width/2, ndcg_scores, width, label='NDCG@10')
+    rects2 = ax.bar(x + width/2, recall_scores, width, label='Recall@10')
+    
+    ax.set_ylabel('Score')
+    ax.set_title('Benchmark Results by Method')
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods, rotation=45, ha='right')
+    ax.legend()
+    
+    plt.tight_layout()
+    
+    # Convert to image
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    img_str = base64.b64encode(buf.read()).decode()
+    plt.close(fig)
+    
+    return f'<img src="data:image/png;base64,{img_str}" style="width:100%">'
+
+def get_ablation_status():
+    """Read config.yaml and return current status"""
+    try:
+        with open("config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+        
+        status_md = "### Current Experiment Configuration (Ablation Status)\n"
+        status_md += f"- **Sustainability Mode:** {'✅ Enabled' if config['recommendation']['sustainability_mode'] else '❌ Disabled (Ablation)'}\n"
+        status_md += f"- **User History in Prompt:** {'✅ Enabled' if config['recommendation']['use_history_in_prompt'] else '❌ Disabled (Ablation)'}\n"
+        status_md += f"- **LLM Re-ranking:** {'✅ Enabled' if config['recommendation']['use_llm_rerank'] else '❌ Disabled (Ablation)'}\n"
+        status_md += f"- **Retrieval K:** {config['recommendation']['retrieval_k']} (Default: 100)\n"
+        status_md += f"- **Embedding Model:** `{config['embedding']['model_name']}`\n"
+        
+        return status_md
+    except Exception as e:
+        return f"Error reading config: {e}"
+
 def create_interface():
     """Create Gradio interface"""
     with gr.Blocks(title="RecLM-RAG: State-of-the-Art Recommender") as app:
@@ -343,89 +434,147 @@ def create_interface():
         - ✅ Comparison with baselines
         """)
         
-        with gr.Row():
-            with gr.Column(scale=1):
-                user_id_input = gr.Dropdown(
-                    choices=all_users if all_users else [],
-                    label="Select User",
-                    allow_custom_value=True,
-                    value=None
+        with gr.Tabs():
+            with gr.Tab("Interactive Demo"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        user_id_input = gr.Dropdown(
+                            choices=[],  # Will be populated on load
+                            label="Select User",
+                            allow_custom_value=True,
+                            value=None
+                        )
+                        
+                        natural_query = gr.Textbox(
+                            label="Natural Language Query (optional)",
+                            placeholder="e.g., 'sustainable products similar to my purchases'",
+                            value=""
+                        )
+                        
+                        k_slider = gr.Slider(
+                            minimum=5,
+                            maximum=20,
+                            value=10,
+                            step=1,
+                            label="Number of Recommendations"
+                        )
+                        
+                        use_llm = gr.Checkbox(
+                            label="Use LLM Re-ranking & Explanations",
+                            value=True
+                        )
+                        
+                        sustainability = gr.Checkbox(
+                            label="Sustainability Mode (Prioritize Eco-Friendly)",
+                            value=False
+                        )
+                        
+                        recommend_btn = gr.Button("Get Recommendations", variant="primary", size="lg")
+                        compare_btn = gr.Button("Compare with Baselines", variant="secondary")
+                    
+                    with gr.Column(scale=2):
+                        recommendations_html = gr.HTML(label="Recommendations")
+                        
+                        with gr.Accordion("User Purchase History", open=False):
+                            history_html = gr.Markdown()
+                        
+                        with gr.Accordion("Baseline Comparison", open=False):
+                            comparison_html = gr.Markdown()
+                
+                # Event handlers
+                recommend_btn.click(
+                    fn=get_recommendations,
+                    inputs=[user_id_input, natural_query, k_slider, use_llm, sustainability],
+                    outputs=[recommendations_html, history_html, comparison_html]
                 )
                 
-                natural_query = gr.Textbox(
-                    label="Natural Language Query (optional)",
-                    placeholder="e.g., 'sustainable products similar to my purchases'",
-                    value=""
+                compare_btn.click(
+                    fn=compare_with_baselines,
+                    inputs=[user_id_input, k_slider],
+                    outputs=[comparison_html, history_html]
                 )
                 
-                k_slider = gr.Slider(
-                    minimum=5,
-                    maximum=20,
-                    value=10,
-                    step=1,
-                    label="Number of Recommendations"
-                )
+                gr.Markdown("""
+                ---
+                ### How it works:
+                1. **Select a user** or enter a custom user ID
+                2. **Optionally** provide a natural language query (e.g., "sustainable products")
+                3. The system retrieves similar products using dense embeddings (FAISS)
+                4. An LLM re-ranks the results and generates personalized explanations
+                5. Results are displayed with scores and explanations
+                """)
+
+            with gr.Tab("Benchmark Results & Analysis"):
+                gr.Markdown("## 📊 Offline Benchmark Results")
+                refresh_btn = gr.Button("Refresh Results")
                 
-                use_llm = gr.Checkbox(
-                    label="Use LLM Re-ranking & Explanations",
-                    value=True
-                )
+                with gr.Row():
+                    with gr.Column():
+                        ablation_status = gr.Markdown(get_ablation_status())
+                        results_json = gr.JSON(label="Raw Metrics")
+                    with gr.Column():
+                        plot_html = gr.HTML(label="Visualization")
                 
-                sustainability = gr.Checkbox(
-                    label="Sustainability Mode (Prioritize Eco-Friendly)",
-                    value=False
-                )
+                def update_benchmark_view():
+                    data = load_benchmark_results()
+                    if isinstance(data, str):
+                        return data, None, get_ablation_status()
+                    
+                    # Assume single category for now or pick first
+                    cat = list(data.keys())[0] if data else None
+                    plot = visualize_benchmark(data[cat]) if cat else None
+                    
+                    return data, plot, get_ablation_status()
                 
-                recommend_btn = gr.Button("Get Recommendations", variant="primary", size="lg")
-                compare_btn = gr.Button("Compare with Baselines", variant="secondary")
-            
-            with gr.Column(scale=2):
-                recommendations_html = gr.HTML(label="Recommendations")
+                refresh_btn.click(update_benchmark_view, outputs=[results_json, plot_html, ablation_status])
                 
-                with gr.Accordion("User Purchase History", open=False):
-                    history_html = gr.Markdown()
-                
-                with gr.Accordion("Baseline Comparison", open=False):
-                    comparison_html = gr.Markdown()
+                # Load on start
+                app.load(update_benchmark_view, outputs=[results_json, plot_html, ablation_status])
         
-        # Event handlers
-        recommend_btn.click(
-            fn=get_recommendations,
-            inputs=[user_id_input, natural_query, k_slider, use_llm, sustainability],
-            outputs=[recommendations_html, history_html, comparison_html]
-        )
+        # Populate user dropdown on load
+        def load_users():
+            return gr.Dropdown(choices=all_users if all_users else [])
         
-        compare_btn.click(
-            fn=compare_with_baselines,
-            inputs=[user_id_input, k_slider],
-            outputs=[comparison_html, history_html]
-        )
-        
-        gr.Markdown("""
-        ---
-        ### How it works:
-        1. **Select a user** or enter a custom user ID
-        2. **Optionally** provide a natural language query (e.g., "sustainable products")
-        3. The system retrieves similar products using dense embeddings (FAISS)
-        4. An LLM re-ranks the results and generates personalized explanations
-        5. Results are displayed with scores and explanations
-        """)
+        app.load(load_users, outputs=[user_id_input])
     
     return app
 
 
+
 if __name__ == "__main__":
     import argparse
+    import yaml
+    
+    # Load config first to set defaults
+    try:
+        with open("config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        config = {}
+        
+    embedding_config = config.get('embedding', {})
+    llm_config = config.get('llm', {})
+    data_config = config.get('data', {})
+    ui_config = config.get('ui', {})
+    
+    default_model = embedding_config.get('model_name', "BAAI/bge-large-en-v1.5")
+    default_llm_provider = llm_config.get('provider', "groq")
+    default_llm_model = llm_config.get('model', "llama-3.1-70b-versatile")
+    default_data_path = data_config.get('data_path', "data")
+    default_processed_path = data_config.get('processed_path', "data/products_processed.parquet")
+    default_index_path = data_config.get('index_path', "index/faiss_index")
+    default_port = ui_config.get('port', 7860)
+    default_share = ui_config.get('share', False)
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="data", help="Path to dataset")
-    parser.add_argument("--processed_path", type=str, default="data/products_processed.parquet")
-    parser.add_argument("--index_path", type=str, default="index/faiss_index")
-    parser.add_argument("--model", type=str, default="BAAI/bge-large-en-v1.5", help="Embedding model")
-    parser.add_argument("--llm_provider", type=str, default="groq", help="LLM provider")
-    parser.add_argument("--llm_model", type=str, default="llama-3.1-70b-versatile", help="LLM model")
-    parser.add_argument("--port", type=int, default=7860, help="Gradio port")
-    parser.add_argument("--share", action="store_true", help="Create public link")
+    parser.add_argument("--data_path", type=str, default=default_data_path, help="Path to dataset")
+    parser.add_argument("--processed_path", type=str, default=default_processed_path)
+    parser.add_argument("--index_path", type=str, default=default_index_path)
+    parser.add_argument("--model", type=str, default=default_model, help="Embedding model")
+    parser.add_argument("--llm_provider", type=str, default=default_llm_provider, help="LLM provider")
+    parser.add_argument("--llm_model", type=str, default=default_llm_model, help="LLM model")
+    parser.add_argument("--port", type=int, default=default_port, help="Gradio port")
+    parser.add_argument("--share", action="store_true", default=default_share, help="Create public link")
     
     args = parser.parse_args()
     
